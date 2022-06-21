@@ -1,0 +1,7 @@
+
+# model
+*.model*
+
+# temp
+temp/
+temp.*
