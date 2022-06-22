@@ -1,5 +1,7 @@
+import pickle
 import time
 import multiprocessing as mp
+import json5
 """
 numpy
 """
@@ -80,7 +82,7 @@ class BSOFModel:
   """
   整个模型
   """
-  def __init__(self, opencv_output, generation, debug):
+  def __init__(self, opencv_output, generation, debug, name, path):
     """
     初始化必要变量
 
@@ -106,8 +108,54 @@ class BSOFModel:
     self.opencv_output      = opencv_output
     self.generation         = generation
     self.debug              = debug
-    #TODO(刘鹏)：修改Loader，使得能够加载视频
+    self.name               = name
+    self.path               = path
     self.settings           = lktools.Loader.get_settings()   #获取配置文件
+
+    #TODO(刘鹏):这里将所有self.settings参数加入到self,弃用自定义__getattribute__方法，要不然多进程无法启动
+
+    self.resource_path = self.settings["resource_path"]
+    self.delay = self.settings["delay"]
+    self.height = self.settings["height"]
+    self.frame_range = self.settings["frame_range"]
+    self.img_path = self.settings["img_path"]
+    self.video_path = self.settings["video_path"]
+    self.svm_model_path = self.settings["svm_model_path"]
+    self.vgg_model_path = self.settings["vgg_model_path"]
+    self.xgboost_model_path = self.settings["xgboost_model_path"]
+    self.file_output = self.settings["file_output"]
+    self.interval = self.settings["interval"]
+    self.fps = self.settings["fps"]
+    self.time_debug = self.settings["time_debug"]
+    self.limit_size = self.settings["limit_size"]
+    self.compression_ratio = self.settings["compression_ratio"]
+    self.linux = self.settings["linux"]
+    self.sift = self.settings["sift"]
+    self.OF = self.settings["OF"]
+    self.debug_level = self.settings["debug_level"]
+    self.app_fps = self.settings["app_fps"]
+    self.varThreshold = self.settings["varThreshold"]
+    self.detectShadows = self.settings["detectShadows"]
+    self.language = self.settings["language"]
+    self.Retina = self.settings["Retina"]
+    self.debug_per_frame = self.settings["debug_per_frame"]
+    self.max_iter = self.settings["max_iter"]
+    self.num_epochs = self.settings["num_epochs"]
+    self.learning_rate = self.settings["learning_rate"]
+    self.momentum = self.settings["momentum"]
+    self.batch_size = self.settings["batch_size"]
+    self.step_size = self.settings["step_size"]
+    self.gamma = self.settings["gamma"]
+    self.num_workers = self.settings["num_workers"]
+    self.data = self.settings["data"]
+    self.cuda = self.settings["cuda"]
+    self.vgg = self.settings["vgg"]
+    self.model_t = self.settings["model_t"]
+    self.init_box_scale = self.settings["init_box_scale"]
+    self.generation_t = self.settings["generation_t"]
+    self.nthread = self.settings["nthread"]
+    self.num_round = self.settings["num_round"]
+
     self.logger             = lktools.LoggerFactory.LoggerFactory(
       'BS_OF', level=self.debug_level
     ).logger
@@ -126,8 +174,7 @@ class BSOFModel:
     self.dataloader         = None
     self.check()
 
-  @lktools.Timer.timer_decorator()
-
+  # @lktools.Timer.timer_decorator()
   def check(self):
     """
     测试，失败就关闭
@@ -150,29 +197,36 @@ class BSOFModel:
       self.thread_stop = True
       self.state = BSOFModel.STOPPED
 
-  def __getattribute__(self, name):
-    """
-    为了方便访问setting的内容，做了以下修改:
-      如果self.NAME访问时，self不含属性NAME，则会在settings中查找。
-      所以只要self和settings中含有同名属性就会报错。
+  # def __getattribute__(self, name):
+  #   """
+  #   为了方便访问setting的内容，做了以下修改:
+  #     如果self.NAME访问时，self不含属性NAME，则会在settings中查找。
+  #     所以只要self和settings中含有同名属性就会报错。
+  #
+  #   请避免传入的settings与self中含同名property。
+  #   """
+  #   #TODO(刘鹏):这个自定义魔术方法是导致该类不能多进程的罪魁祸首
+  #   try:
+  #     obj = super().__getattribute__(name)
+  #   except:
+  #     return super().__getattribute__('settings').get(name)
+  #   else:
+  #     setting = super().__getattribute__('settings').get(name)
+  #     if setting is None:
+  #       return obj
+  #     else:
+  #       self.logger.error(BSOFModel.__getattribute__.__doc__)
+  #       self.logger.error(f"冲突为:self.{name}及self.settings['{name}']")
+  #       from sys import exit
+  #       exit(1)
+  # # #TODO(刘鹏）：对象序列化时需要
+  def __getstate__(self):
+    return self.__dict__
 
-    请避免传入的settings与self中含同名property。
-    """
-    try:
-      obj = super().__getattribute__(name)
-    except:
-      return super().__getattribute__('settings').get(name)
-    else:
-      setting = super().__getattribute__('settings').get(name)
-      if setting is None:
-        return obj
-      else:
-        self.logger.error(BSOFModel.__getattribute__.__doc__)
-        self.logger.error(f"冲突为:self.{name}及self.settings['{name}']")
-        from sys import exit
-        exit(1)
+  def __setstate__(self, d):
+    self.__dict__.update(d)
 
-  @lktools.Timer.timer_decorator()
+  # @lktools.Timer.timer_decorator()
   def catch_abnormal(self, src):  #获得所有异常框
     """
     对一帧图像进行处理，找到异常就用框圈出来。
@@ -306,7 +360,7 @@ class BSOFModel:
     # 返回
     return attr
 
-  @lktools.Timer.timer_decorator()
+  # @lktools.Timer.timer_decorator()
   def judge(self, src, rects, abnormal):
     """
     对识别出的异常区域进行分类或训练（根据self.generation）。
@@ -413,12 +467,12 @@ class BSOFModel:
     # return func(src, rects[0], rects[1:], abnormal)   #rects[0]为检测范围框， rects[1:]为异常框
     return func(src, rects["range"], rects, abnormal)
 
-  @lktools.Timer.timer_decorator()
+  # @lktools.Timer.timer_decorator()
   def one_video_classification(self, path):
     """
     处理一个单独的视频
     """
-    @lktools.Timer.timer_decorator()
+    # @lktools.Timer.timer_decorator()
     def loop(size):
       """
       如果线程结束
@@ -443,11 +497,6 @@ class BSOFModel:
       l_range, r_range = self.frame_range
 
       #TODO(刘鹏）：当为网络摄像头的时候，无法计算视频帧数
-      if self.webcam == "":
-        if r_range < 0:
-          r_range += self.now['count']
-        if self.nframes > r_range:
-          return False
       success, frame = capture.read()
       if not success:
         return False
@@ -460,7 +509,7 @@ class BSOFModel:
         self.lastn = frame
         return True
       return frame
-    @lktools.Timer.timer_decorator()
+    # @lktools.Timer.timer_decorator()
     def save(frame, frame_trim, frame_rects, abnormal, classes, attributes):
       """
       保存相关信息至self.now，便于其它类使用（如App）
@@ -480,7 +529,7 @@ class BSOFModel:
       self.now['abnormal']    = abnormal
       self.now['classes']     = classes
       self.now['attributes']  = attributes
-    @lktools.Timer.timer_decorator()
+    # @lktools.Timer.timer_decorator()
     def output(frame, size):
       """
       输出一帧处理过的图像（有异常框）
@@ -532,7 +581,7 @@ class BSOFModel:
         else:
           frame = cv2AddChineseText(frame, "无异常", (700, 20), (0, 255, 0), 30)
         cv2.imshow(f'{py}', frame)
-        cv2.imshow(f'{py} abnormal BS', self.now['abnormal']['BS'])
+        # cv2.imshow(f'{py} abnormal BS', self.now['abnormal']['BS'])
         #TODO OF也画出来
         # cv2.imshow(f'{py} abnormal OF', self.now['abnormal']['OF'])
         if cv2.waitKey(self.delay) == 27:
@@ -562,7 +611,7 @@ class BSOFModel:
           cv2.imwrite(f'/Users/wzy/Downloads/temp/op{self.opnum}.jpg', img)
           cv2.imwrite(f'/Users/wzy/Downloads/temp/src{self.opnum}.jpg', self.now['frame'])
           self.opnum = self.opnum + 1
-    @lktools.Timer.timer_decorator()
+    # @lktools.Timer.timer_decorator()
     def update(original):
       """
       如果@nframes计数为@interval的整数倍:
@@ -583,7 +632,7 @@ class BSOFModel:
         #
         # self.fgbg.apply(self.lastn)
       self.last = original
-    @lktools.Timer.timer_decorator()
+    # @lktools.Timer.timer_decorator()
     def trim(frame):
       """
       对图片进行裁剪
@@ -646,7 +695,6 @@ class BSOFModel:
     # TODO(刘鹏）：使用自定义VideoCapture,支持多进程推流
     capture = VideoCapture(path)
     while True:
-
       self.logger.debug('判断是否循环')
 
       l = loop(size)
@@ -748,7 +796,8 @@ class BSOFModel:
       return min(map(lambda ds: ds.num_classes, self.dataset.values()))
     else:
       return self.dataset.num_classes
-  @lktools.Timer.timer_decorator()
+
+  # @lktools.Timer.timer_decorator()
   def classification(self):
     """
     对视频做异常帧检测并分类
@@ -862,7 +911,7 @@ class BSOFModel:
           self.logger.info(f'nan: {nan}')
           self.logger.info(f'花费时间：{etime - stime:.0f}s')
         # 训练一轮
-        @lktools.Timer.timer_decorator(show=True, start_info=start, end_info=end)
+        # @lktools.Timer.timer_decorator(show=True, start_info=start, end_info=end)
         def train_one_epoch(epoch, data, model, optim, scheduler, criterion):
           scheduler.step()
           train_loss = 0
@@ -1054,7 +1103,7 @@ class BSOFModel:
 
 
 
-  @lktools.Timer.timer_decorator()
+  # @lktools.Timer.timer_decorator()
   def foreach(self, single_func, clear_func):
     """
     对每一个视频，运行single_func去处理该视频，最后用clear_func清理变量。
@@ -1070,17 +1119,15 @@ class BSOFModel:
     self.now = {}
 
     #TODO（刘鹏）修改逻辑，处理网络摄像头的情况，当接入网络摄像头，不进行循环,修改self.videos属性
-    for name, video in self.videos:
-      self.now['name'] = name
-      try:
-        self.now['pinyin'] = pinyin.get_pinyin(name, ' ')
-      except Exception:
-        self.now['pinyin'] = name
-      single_func(video)
-      clear_func()
-      self.now.clear()
-      if self.thread_stop:
-        break
+
+    self.now['name'] = self.name
+    try:
+      self.now['pinyin'] = pinyin.get_pinyin(self.name, ' ')
+    except Exception:
+      self.now['pinyin'] = self.name
+    single_func(self.path)
+    clear_func()
+    self.now.clear()
     self.state = BSOFModel.STOPPED
 
   RUNNING = 'running'
@@ -1096,7 +1143,7 @@ class BSOFModel:
       self.state = BSOFModel.RUNNING
 
   @property
-  @lktools.Timer.timer_decorator()
+  # @lktools.Timer.timer_decorator()
   def box(self):
     """
     计算当前蓝框的具体坐标
@@ -1137,5 +1184,19 @@ if __name__ == '__main__':
   show  = 'show'  in sys.argv
   model = 'model' in sys.argv
   debug = 'debug' in sys.argv
-  model = BSOFModel(nothing or show, not debug and model, debug)
-  model.classification()
+
+  #TODO(刘鹏）：单独加载webcams.json，读取视频流个数
+  with open("webcams.json", encoding="utf-8") as f:
+    webcams = json5.load(f)
+
+  processes = []
+  models = []
+  for name, path in webcams.items():
+    models.append(BSOFModel(nothing or show, not debug and model, debug, name, path))
+  for model in models:
+    processes.append(mp.Process(target=model.classification))
+  for process in processes:
+    process.start()
+  for process in processes:
+    process.join()
+  # model.classification()

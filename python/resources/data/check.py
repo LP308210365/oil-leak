@@ -19,7 +19,7 @@ def check(logger, checker, user_settings, test):
 
   checker.check(
     (
-      'path', 'debug_level',
+      'debug_level',
       'img_path', 'video_path',
       'language', 'vgg',
       'svm_model_path', 'vgg_model_path', 'xgboost_model_path',
@@ -28,7 +28,7 @@ def check(logger, checker, user_settings, test):
   )
   checker.check(
     (
-      'videos', 'frame_range',
+      'frame_range',
       'init_box_scale',
     ), list
   )
@@ -68,14 +68,12 @@ def check(logger, checker, user_settings, test):
 
   logger.debug('check legal')
 
-  class_info_exists = checker.check('path', checker.has_file, 'class_info_file')
 
-  #TODO(刘鹏）：检查webcams.json
-  webcams_exits = checker.check('webcam_file', checker.exist,)
+
 
   checker.check(
     (
-      'videos', 'resource_path',
+      'resource_path',
       'img_path', 'video_path',
       'svm_model_path', 'vgg_model_path', 'xgboost_model_path',
       'language',
@@ -92,9 +90,6 @@ def check(logger, checker, user_settings, test):
   checker.check('generation_t', checker.within, ('video', 'image'))
   checker.check('max_iter', checker.plus_or_minus1)
   checker.check('num_workers', checker.plus_or_zero)
-  checker.check('data', checker.len_is, 2)
-  checker.check('data.train', checker.is_dir)
-  checker.check('data.test', checker.is_dir)
   checker.check(
     (
       'delay', 'height',
@@ -106,20 +101,6 @@ def check(logger, checker, user_settings, test):
       'batch_size', 'nthread', 'num_round',
     ), checker.plus
   )
-
-  logger.debug('加入class_info并作检查')
-
-  if class_info_exists:
-    class_info_file = f"{user_settings['path']}/{user_settings['class_info_file']}"
-    with open(class_info_file, encoding='utf-8') as f:
-      user_settings['class_info'] = json5.load(f)
-    checker.check('class_info', checker.within, Abnormal.Abnormal.names())
-
-  #TODO(刘鹏）：添加webcams读取
-  if webcams_exits:
-    webcams_file = f"{user_settings['webcam_file']}"
-    with open(webcams_file, encoding='utf-8') as f:
-      user_settings['webcams'] = json5.load(f)
 
   if checker.dirty:
     logger.error("参数检查失败。。。请调整后再运行")
@@ -137,46 +118,6 @@ def check(logger, checker, user_settings, test):
     'critical': logging.CRITICAL,
   }[debug_level]
 
-  logger.debug("去掉路径最后的'/'")
-
-  path = user_settings['path']
-  if path[-1] == '/':
-    path = path[:-1]
-    user_settings['path'] = path
-
-  logger.debug('将设置中的文件转换为绝对地址，匹配videos')
-
-
-
-  __videos = []
-  class_info = user_settings['class_info'].keys()
-  #TODO（刘鹏）：修改逻辑，读的不再是videos里的视频名，而是webcams里的url地址，如果视频存在，videos就放网络摄像头地址
-  if webcams_exits:
-    videos = user_settings["webcams"]
-    for name, f in videos.items():
-      __videos.append((name, f))
-  else:
-    videos = user_settings['videos']
-    for video in videos:
-      for f in glob.glob(f'{path}/{video}'):
-        f = f.replace('\\', '/')
-        splits = f.split('.')
-        if len(splits) <= 1:
-          logger.debug('文件没有扩展名')
-          continue
-        if splits[-1] == 'json':
-          logger.debug('设置文件')
-          continue
-        name = splits[-2].split('/')[-1]
-        if len(name) == 0:
-          logger.debug('无名特殊文件')
-          continue
-        if name not in class_info:
-          logger.debug(f'配置文件不包含文件"{name}"')
-          continue
-        __videos.append((name, f))
-
-  user_settings['videos'] = __videos
 
   logger.debug('测试的情况下该返回了')
   if test:
