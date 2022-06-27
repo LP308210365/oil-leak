@@ -1,6 +1,8 @@
 """
 opencv
 """
+import time
+
 import cv2
 """
 numpy
@@ -24,9 +26,11 @@ class ABVideoCapture(abc.ABC):
     self.stack = Manager().list()
     self.queue = mp.Queue(maxsize=3)
     self.max_cache = top
-    self.write_process = Process(target=self.__class__.write, args=(self.queue, cam, top))
+    self.cam = cam
+    self.write_process = Process(target=self.write)
     self.write_process.start()
     self.__read_gen = self.read_gen()
+    self.timer = True
 
   @abc.abstractmethod
   def process_image(self, image):
@@ -36,10 +40,24 @@ class ABVideoCapture(abc.ABC):
     while True:
       if self.queue.qsize() != 0:
         img = self.process_image(self.queue.get())
+        self.timer = True
         yield img
+      else:
+        if self.timer:
+          start = time.time()
+          self.timer = False
+        end = time.time()
+        if end - start > 3:
+          yield None
+
 
   def read(self):
     try:
+      frame = next(self.__read_gen)
+      if frame is not None:
+        return True, frame
+      else:
+        return False, None
       return True, next(self.__read_gen)
     except StopIteration:
       return False, None
@@ -61,19 +79,18 @@ class ABVideoCapture(abc.ABC):
   def __exit__(self, exc_type, exc_val, exc_tb):
     self.release()
 
-  @staticmethod
-  def write(queue, cam, top):
+  def write(self):
     """向共享缓冲栈中写入数据"""
 
-    cap = cv2.VideoCapture(cam)
+    self.cap = cv2.VideoCapture(self.cam)
     while True:
-      _, img = cap.read()
+      _, img = self.cap.read()
       if _:
-        queue.put(img)
+        self.queue.put(img)
         # 每到一定容量清空一次缓冲栈
         # 利用gc库，手动清理内存垃圾，防止内存溢出
-        if queue.qsize() >= top:
-          queue.get()
+        if self.queue.qsize() >= self.max_cache:
+          self.queue.get()
           gc.collect()
 
 

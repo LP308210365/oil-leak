@@ -1,7 +1,8 @@
-import pickle
 import time
 import multiprocessing as mp
 import json5
+import math
+import gc
 """
 numpy
 """
@@ -82,7 +83,7 @@ class BSOFModel:
   """
   整个模型
   """
-  def __init__(self, opencv_output, generation, debug, name, path):
+  def __init__(self, opencv_output, generation, debug, webcams, time_rotate):
     """
     初始化必要变量
 
@@ -108,8 +109,8 @@ class BSOFModel:
     self.opencv_output      = opencv_output
     self.generation         = generation
     self.debug              = debug
-    self.name               = name
-    self.path               = path
+    self.webcams            = webcams
+    self.time_rotate        = time_rotate
     self.settings           = lktools.Loader.get_settings()   #获取配置文件
 
     #TODO(刘鹏):这里将所有self.settings参数加入到self,弃用自定义__getattribute__方法，要不然多进程无法启动
@@ -172,6 +173,7 @@ class BSOFModel:
     self.debug_param        = {'continue': False, 'step': 0}
     self.dataset            = None
     self.dataloader         = None
+    self.fgbg               = None
     self.check()
 
   # @lktools.Timer.timer_decorator()
@@ -197,34 +199,6 @@ class BSOFModel:
       self.thread_stop = True
       self.state = BSOFModel.STOPPED
 
-  # def __getattribute__(self, name):
-  #   """
-  #   为了方便访问setting的内容，做了以下修改:
-  #     如果self.NAME访问时，self不含属性NAME，则会在settings中查找。
-  #     所以只要self和settings中含有同名属性就会报错。
-  #
-  #   请避免传入的settings与self中含同名property。
-  #   """
-  #   #TODO(刘鹏):这个自定义魔术方法是导致该类不能多进程的罪魁祸首
-  #   try:
-  #     obj = super().__getattribute__(name)
-  #   except:
-  #     return super().__getattribute__('settings').get(name)
-  #   else:
-  #     setting = super().__getattribute__('settings').get(name)
-  #     if setting is None:
-  #       return obj
-  #     else:
-  #       self.logger.error(BSOFModel.__getattribute__.__doc__)
-  #       self.logger.error(f"冲突为:self.{name}及self.settings['{name}']")
-  #       from sys import exit
-  #       exit(1)
-  # # #TODO(刘鹏）：对象序列化时需要
-  def __getstate__(self):
-    return self.__dict__
-
-  def __setstate__(self, d):
-    self.__dict__.update(d)
 
   # @lktools.Timer.timer_decorator()
   def catch_abnormal(self, src):  #获得所有异常框
@@ -489,7 +463,15 @@ class BSOFModel:
         那么会返回frame，即当前帧
       否则
         返回False，即break
+
+      统计time_rotate
+      如果轮巡时间到，则结束
       """
+      # TODO(刘鹏）：增加轮巡时间判定，当达到time_rotate，则进程结束
+      self.time_end = time.time()
+      if self.time_end - self.time_start >= self.time_rotate:
+        return False
+
       if self.thread_stop:
         return False
       if self.state is BSOFModel.PAUSED:
@@ -770,6 +752,7 @@ class BSOFModel:
     if self.opencv_output and not self.linux:
       self.logger.debug('销毁窗口')
       cv2.destroyAllWindows()
+    del self.judge_cache
     self.judge_cache         = { 'area': 0, 'max_area_rate': 0 }
     self.nframes             = 0
     self.last                = None
@@ -778,7 +761,12 @@ class BSOFModel:
     self.box_cache           = None
     self.skip_first_abnormal = True
     self.abnormals           = Abnormal.Abnormal()
+    self.rect_mask = None
     """为一个视频建立一个混合高斯模型"""
+    #TODO(刘鹏）：注意一定要手动进行垃圾回收，要不然回收不及时的话，就会爆内存
+    del self.fgbg
+    gc.collect()
+
     self.fgbg                = cv2.createBackgroundSubtractorMOG2(
       varThreshold=self.varThreshold,
       detectShadows=self.detectShadows
@@ -803,78 +791,9 @@ class BSOFModel:
     对视频做异常帧检测并分类
     """
     def svm():
-      if not self.generation:
-        self.classifier = joblib.load(self.svm_model_path)
-        self.foreach(self.one_video_classification, self.clear_classification)
-        return
-      # 是否测试
-      need_test = os.path.exists(self.svm_model_path)
-      def train():
-        if self.generation_t == 'video':
-          self.foreach(self.one_video_classification, self.clear_classification)
-        elif self.generation_t == 'image':
-          self.dataset = BSOFDataset(self.data['train'])
-          length = len(self.dataset)
-          length_100 = max(length // 100, 1)
-          X = []
-          Y = []
-          count = 0
-          for i in range(length):
-            img, label = self.dataset.raw_img(i)
-            X.append(self.attributes(img))
-            Y.append(self.dataset.classes[label])
-            if count % length_100 == 0:
-              self.logger.info(f'{100 * count / length:.0f}%')
-            count += 1
-          cache = self.generation_cache
-          cache['X'] = X
-          cache['Y'] = Y
-        self.logger.debug('训练模型')
-        kwargs = {
-          'gamma'                   : 'scale',
-          'decision_function_shape' : 'ovo',
-          'max_iter'                : self.max_iter,
-          'probability'             : True,
-        }
-        classifier = sklearn.svm.SVC(**kwargs)
-        self.logger.info(kwargs)
-        classifier.fit(self.generation_cache['X'], self.generation_cache['Y'])
-        joblib.dump(classifier, self.svm_model_path)
-      def test():
-        self.classifier = joblib.load(self.svm_model_path)
-        self.dataset = BSOFDataset(self.data['test'])
-        length = len(self.dataset)
-        length_100 = max(length // 100, 1)
-        count = 0
-        error = 0
-        matrix = {
-          c: {cc: 0 for cc in self.dataset.classes}
-          for c in self.dataset.classes
-        }
-        if self.file_output:
-          path = 'temp/svm'
-          if not os.path.exists(path):
-            os.makedirs(path)
-        for i in range(length):
-          img, label = self.dataset.raw_img(i)
-          x = [self.attributes(img)]
-          y = self.dataset.classes[label]
-          predict = self.classifier.predict(x)[0]
-          if self.file_output:
-            cv2.imwrite(f'{path}/{i}_{predict}.jpg', img)
-          error += (y != predict)
-          matrix[y][predict] += 1
-          count += 1
-          if count % length_100 == 0:
-            self.logger.info(
-              f'avg auc: {error * 100 / count:.2f}%; {100 * count / length:.0f}%'
-            )
-        self.logger.info(f'auc: {error * 100 / length:.2f}% of {length}')
-        self.logger.info(matrix)
-      if need_test:
-        test()
-      else:
-        train()
+      self.classifier = joblib.load(self.svm_model_path)
+      self.foreach(self.one_video_classification, self.clear_classification)
+      return
     def vgg():
       # 载入模型
       def load():
@@ -1119,15 +1038,22 @@ class BSOFModel:
     self.now = {}
 
     #TODO（刘鹏）修改逻辑，处理网络摄像头的情况，当接入网络摄像头，不进行循环,修改self.videos属性
+    i = 0
+    while True:
+      self.time_start = time.time()
+      name  = list(self.webcams.keys())[i]
+      video = list(self.webcams.values())[i]
+      self.now['name'] = name
+      self.now['pinyin'] = pinyin.get_pinyin(name, ' ')
+      single_func(video)
+      clear_func()
+      self.now.clear()
+      if self.thread_stop:
+        break
+      i += 1
+      if i == len(self.webcams):
+        i = 0
 
-    self.now['name'] = self.name
-    try:
-      self.now['pinyin'] = pinyin.get_pinyin(self.name, ' ')
-    except Exception:
-      self.now['pinyin'] = self.name
-    single_func(self.path)
-    clear_func()
-    self.now.clear()
     self.state = BSOFModel.STOPPED
 
   RUNNING = 'running'
@@ -1178,6 +1104,13 @@ class BSOFModel:
     # 重新设置box scale之后，需要忽略一帧
     self.skip_first_abnormal = True
 
+def dict_slice(adict, start, end):
+  keys = adict.keys()
+  dict_slice = {}
+  for k in list(keys)[start:end]:
+    dict_slice[k] = adict[k]
+  return dict_slice
+
 if __name__ == '__main__':
   import sys
   nothing = len(sys.argv) == 0
@@ -1185,18 +1118,41 @@ if __name__ == '__main__':
   model = 'model' in sys.argv
   debug = 'debug' in sys.argv
 
-  #TODO(刘鹏）：单独加载webcams.json，读取视频流个数
+  #TODO(刘鹏）：单独加载webcams.json，读取所有视频流
   with open("webcams.json", encoding="utf-8") as f:
     webcams = json5.load(f)
 
+  #TODO（刘鹏）：重写逻辑，轮巡完一遍以后不重新创建进程，而是用当前进程,进程数根据组数自动确定
+  #将摄像头按照轮巡组大小进行分配
+  num_rotate  = 2
+  time_rotate = 30 # 秒钟
+  num_webcams = len(webcams)
+  if num_rotate > num_webcams:
+    num_rotate = num_webcams
+  sub_num_webcams = math.ceil(num_webcams / num_rotate)
+  remainder = num_webcams % num_rotate
+  start, end = 0, sub_num_webcams
   processes = []
-  models = []
-  for name, path in webcams.items():
-    models.append(BSOFModel(nothing or show, not debug and model, debug, name, path))
+  models    = []
+  while start < num_webcams:
+    #获取当前进程的webcanms
+    webcams_sub = dict_slice(webcams, start, end)
+    #创建模型
+    models.append(BSOFModel(nothing or show, not debug and model, debug, webcams_sub, time_rotate))
+    start += sub_num_webcams
+    end   += sub_num_webcams
+    if 0 < remainder < 2:
+      end -= 1
+      if remainder < 1:
+        start -= 1
+    else:
+      sub_num_webcams = 1
+    remainder -= 1
+  #为模型创建进程
   for model in models:
     processes.append(mp.Process(target=model.classification))
+  #进程启动
   for process in processes:
     process.start()
   for process in processes:
     process.join()
-  # model.classification()
